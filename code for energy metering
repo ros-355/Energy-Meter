@@ -1,0 +1,126 @@
+#define BLYNK_PRINT Serial
+#define BLYNK_TEMPLATE_ID "TMPL6AKPCBkF0"
+#define BLYNK_TEMPLATE_NAME "IOT Grid Energy Monitor and Power Factor"
+
+#include <WiFi.h>
+#include <BlynkSimpleEsp32.h>
+#include <Arduino.h>
+#include <EmonLib.h>
+#include <math.h>
+
+// WiFi Credentials
+char auth[] = "ThGUqRScSlJHPHKu2QoFcu6OWDfJf-Go";  // Replace with your Blynk Auth Token
+char ssid[] = "greenhouse207_dhrn_2.4";            // Replace with your WiFi SSID
+char pass[] = "Greenhouse@207";   //your WiFi Password
+
+// Number of Samples for Filtering
+#define NUM_SAMPLES 10  
+
+// Relay Pin for Capacitor Bank
+#define RELAY_PIN  25  // Change according to your connection
+
+EnergyMonitor emon1;
+BlynkTimer timer; // Timer for sending data to Blynk
+
+// Arrays for Filtering Sensor Readings
+float voltageSamples[NUM_SAMPLES] = {0};
+float currentSamples[NUM_SAMPLES] = {0};
+int sampleIndex = 0;
+
+// Blynk Virtual Pins
+#define VPIN_REAL_POWER V0
+#define VPIN_APPARENT_POWER V1
+#define VPIN_POWER_FACTOR V2
+#define VPIN_VOLTAGE V3
+#define VPIN_CURRENT V4
+#define VPIN_RELAY_STATUS V5
+#define VPIN_REQUIRED_KVAR V6
+
+void setup()
+{  
+  Serial.begin(9600);
+  
+  // Blynk Initialization
+  Blynk.begin(auth, ssid, pass);
+
+  // Setup EmonLib for Power Monitoring
+  emon1.voltage(34, 95, 0.1);  // Voltage: input pin, calibration, phase_shift
+  emon1.current(35, 1.8);      // Current: input pin, calibration.
+
+  pinMode(RELAY_PIN, OUTPUT);    // Set relay as output
+  digitalWrite(RELAY_PIN, LOW);  // Initially keep relay OFF
+
+  // Set Timer to Send Data to Blynk Every 5 Seconds
+  timer.setInterval(5000L, sendDataToBlynk);
+}
+
+float getFilteredValue(float newValue, float *samplesArray) {
+  // Insert new sample
+  samplesArray[sampleIndex] = newValue;
+  
+  // Calculate average
+  float sum = 0;
+  for (int i = 0; i < NUM_SAMPLES; i++) {
+    sum += samplesArray[i];
+  }
+  
+  // Move to the next index in circular buffer
+  sampleIndex = (sampleIndex + 1) % NUM_SAMPLES;
+  
+  return sum / NUM_SAMPLES;
+}
+
+void sendDataToBlynk() {
+  // 🔹 Read Sensor Values
+  emon1.calcVI(20, 2000); // Calculate all: No. of half wavelengths, time-out
+  
+  float realPower       = emon1.realPower;       
+  float apparentPower   = emon1.apparentPower;    
+  float powerFactor     = emon1.powerFactor;     
+  float supplyVoltage   = getFilteredValue(emon1.Vrms, voltageSamples); 
+  float Irms            = getFilteredValue(emon1.Irms, currentSamples);
+
+  // 🔹 Calculate Required kVAR for PF Correction
+  float phi = acos(powerFactor);
+  float phi2 = 0.48;  // Desired power factor (adjust as needed)
+  float requiredkvar = (realPower) * (tan(phi) - tan(phi2));
+
+  // Power Factor Correction Logic
+  if (powerFactor < 0.800) {
+    digitalWrite(RELAY_PIN, HIGH); // Turn ON capacitor bank
+    Serial.println("⚠ Power Factor LOW! Activating Capacitor Bank.");
+    Serial.print("Required kVAR: "); Serial.print(requiredkvar); Serial.println(" kVAR");
+    Blynk.virtualWrite(VPIN_RELAY_STATUS, 1); // Update Blynk
+  } else {
+    digitalWrite(RELAY_PIN, LOW);  // Turn OFF capacitor bank
+    Blynk.virtualWrite(VPIN_RELAY_STATUS, 0);
+  }
+
+  // Send Data to Blynk
+  Blynk.virtualWrite(VPIN_REAL_POWER, realPower);
+  Blynk.virtualWrite(VPIN_APPARENT_POWER, apparentPower);
+  Blynk.virtualWrite(VPIN_POWER_FACTOR, powerFactor);
+  Blynk.virtualWrite(VPIN_VOLTAGE, supplyVoltage);
+  Blynk.virtualWrite(VPIN_CURRENT, Irms);
+  Blynk.virtualWrite(VPIN_REQUIRED_KVAR, requiredkvar);
+
+  // Print Data for Serial Monitor
+  Serial.print("🔹 Real Power: "); Serial.print(realPower); Serial.print(" W, ");
+  Serial.print("Apparent Power: "); Serial.print(apparentPower); Serial.print(" VA, ");
+  Serial.print("Power Factor: "); Serial.print(powerFactor); Serial.print(", ");
+  Serial.print("Voltage: "); Serial.print(supplyVoltage); Serial.print(" V, ");
+  Serial.print("Current: "); Serial.print(Irms); Serial.println(" A");
+
+  // 🔹 Data format for Serial Plotter
+  Serial.print(realPower); Serial.print(",");
+  Serial.print(apparentPower); Serial.print(",");
+  Serial.print(powerFactor); Serial.print(",");
+  Serial.print(supplyVoltage); Serial.print(",");
+  Serial.println(Irms);
+}
+
+void loop()
+{
+  Blynk.run();
+  timer.run(); // Run the Blynk timer to send data at intervals
+}
